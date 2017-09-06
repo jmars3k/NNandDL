@@ -329,6 +329,39 @@ class Network2(object):
         json.dump(data, f)
         f.close()
 
+    def seeCosineSimilarityPatterns(self):
+
+        stride = 7
+        yes = ["Y", "y", "Yes", "yes"]
+        similarityWeights = self.weights[0]
+
+        for numPattern in np.arange(4):
+            for row in np.arange(4):
+                for col in np.arange(4):
+                    selection = (numPattern *16) + (row * 4) + col
+                    temp = similarityWeights[selection, :]
+                    temp = temp.reshape((28,28))
+                    temp = temp[(row * stride) : ((row * stride) + stride), (col * stride) : ((col * stride) + stride)]
+                    if selection == 0:
+                        plt.imshow(temp)
+                        plt.colorbar()
+                        plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
+                        plt.pause(0.5)
+                        myInput = input("See another?")
+                        if myInput not in yes:
+                            return
+                    else:
+                        plt.close()
+                        plt.imshow(temp)
+                        plt.colorbar()
+                        plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
+                        plt.pause(0.5)
+                        myInput = input("See another?")
+                        if myInput not in yes:
+                            return
+        return
+
+
 #******************************************************************************
 #******************************************************************************
 #******************************************************************************
@@ -349,7 +382,7 @@ def load(filename):
     data = json.load(f)
     f.close()
     cost = getattr(sys.modules[__name__], data["cost"])
-    net = Network(data["sizes"], cost=cost)
+    net = Network2(data["sizes"], cost=cost)
     net.weights = [np.array(w) for w in data["weights"]]
     net.biases = [np.array(b) for b in data["biases"]]
     return net
@@ -422,7 +455,7 @@ fVect = np.vectorize(f)
 #                  [0.7, 0.9, 0.1],
 #                  [0.3, 0.5, 0.7]])
 #
-# test = fVect(test)
+# new = test[0]
 
 training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
 # net = Network([784, 30, 10])
@@ -430,7 +463,7 @@ training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
 
 net = Network2([784, 64, 30, 10], cost=CrossEntropyCost, cosineSimilarity=True)
 #net.large_weight_initializer()
-evaluation_cost, evaluation_accuracy, _, _, etaHistory = net.SGD(training_data, 30, 10, 0.5, lmbda = 5.0, evaluation_data = validation_data, monitor_evaluation_accuracy = True, monitor_evaluation_cost = True)
+evaluation_cost, evaluation_accuracy, _, _, etaHistory = net.SGD(training_data, 1, 10, 0.5, lmbda = 5.0, evaluation_data = validation_data, monitor_evaluation_accuracy = True, monitor_evaluation_cost = True)
 
 fig1, (ax1, ax2, ax3) = plt.subplots(3, 1)
 ax1.set_title("Evaluation Cost")
@@ -447,6 +480,10 @@ ax3.set_ylabel("Learning Rate (Eta)")
 ax3.plot(etaHistory)
 fig1.tight_layout(h_pad=0.5)
 plt.show()
+
+myInput = input("Hit y to view after training patterns")
+if myInput == "y":
+    net.seeCosineSimilarityPatterns()
 
 testDataList = list(test_data)
 finalAccuracy = net.accuracy(testDataList, convert=False)
