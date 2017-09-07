@@ -62,6 +62,8 @@ class Network2(object):
         """
         self.num_layers = len(sizes)
         self.sizes = sizes
+        self.evalDataList = []
+        self.trainingDataList = []
         if not cosineSimilarity:
             self.default_weight_initializer()
         else:
@@ -160,20 +162,20 @@ class Network2(object):
 
         """
         if evaluation_data:
-            evalDataList = list(evaluation_data)
-            n_data = len(evalDataList)
+            self.evalDataList = list(evaluation_data)
+            n_data = len(self.evalDataList)
 
-        trainingDataList = list(training_data)
-        n = len(trainingDataList)
+        self.trainingDataList = list(training_data)
+        n = len(self.trainingDataList)
 
         evaluation_cost, evaluation_accuracy = [], []
         training_cost, training_accuracy = [], []
         etaHistory = []
         for j in np.arange(epochs):
-            random.shuffle(trainingDataList)
-            mini_batches = [trainingDataList[k:k + mini_batch_size] for k in np.arange(0, n, mini_batch_size)]
+            random.shuffle(self.trainingDataList)
+            mini_batches = [self.trainingDataList[k:k + mini_batch_size] for k in np.arange(0, n, mini_batch_size)]
             for mini_batch in mini_batches:
-                self.update_mini_batch(mini_batch, eta, lmbda, len(trainingDataList))
+                self.update_mini_batch(mini_batch, eta, lmbda, len(self.trainingDataList))
             print("Epoch {} complete".format(j))
             if monitor_training_cost:
                 cost = self.total_cost(training_data, lmbda)
@@ -184,11 +186,11 @@ class Network2(object):
                 training_accuracy.append(accuracy)
                 print("Accuracy on training data: {0} / {1}".format(accuracy, n))
             if monitor_evaluation_cost:
-                cost = self.total_cost(evalDataList, lmbda, convert=True)
+                cost = self.total_cost(self.evalDataList, lmbda, convert=True)
                 evaluation_cost.append(cost)
                 print("Cost on evaluation data: {}".format(cost))
             if monitor_evaluation_accuracy:
-                accuracy = self.accuracy(evalDataList)
+                accuracy = self.accuracy(self.evalDataList)
 
                 lastAcuuracyIndex = len(evaluation_accuracy)-1
 
@@ -201,15 +203,17 @@ class Network2(object):
                         self.weights = self.oldWeights.copy()
                         self.biases = self.oldBiases.copy()
                         eta = eta/2
-                        print("A step backward, keeping old weights and biases and decreasing leaning rate to {}".format(eta))
+                        print("Worse, keeping old weights and biases and decreasing leaning rate to {}".format(eta))
                     else:
                         self.oldWeights = self.weights.copy()
                         self.oldBiases = self.biases.copy()
                         eta = 1.25 * eta
-                        print("A step forward, increasing the learning rate to {}".format(eta))
+                        print("Better, increasing the learning rate to {}".format(eta))
                     evaluation_accuracy.append(accuracy)
                     etaHistory.append(eta)
 
+                    if evaluation_accuracy == len(self.evalDataList):
+                        print("Success, exiting now!")
 
         return evaluation_cost, evaluation_accuracy, training_cost, training_accuracy, etaHistory
 
@@ -266,7 +270,7 @@ class Network2(object):
             nabla_w[-l] = np.dot(delta, activations[-l - 1].transpose())
         return (nabla_b, nabla_w)
 
-    def accuracy(self, dataList, convert=False):
+    def accuracy(self, dataList, convert=False, epoch = 1):
         """Return the number of inputs in ``data`` for which the neural
         network outputs the correct result. The neural network's
         output is assumed to be the index of whichever neuron in the
@@ -290,16 +294,16 @@ class Network2(object):
 
         """
         results = []
-        if convert:
+        if convert: #training data
             results = [(np.argmax(self.feedforward(x)), np.argmax(y)) for (x, y) in dataList]
-        else:
+        else:       #verification or test data
 #            results = [(np.argmax(self.feedforward(x)), y) for (x, y) in dataList]
-            for (x, y) in dataList:
+            for (x, y) in dataList: #break up list comprehension so I can generate new training data
                 currentResult = np.argmax(self.feedforward(x))
                 results.append((currentResult, y))
-                # if (currentResult != y):
-                #     x = x.reshape((28,28))
-                #     numPlot = plt.imshow(x)
+                if (currentResult != y) and (epoch <= 5):    #add bad eval case or a version of it to the training data
+                    temp = vectorized_result(y)
+                    self.trainingDataList.append((self.genNewTrainingData(x, epoch), temp))
 
         return sum(int(x == y) for (x, y) in results)
 
@@ -361,6 +365,77 @@ class Network2(object):
                             return
         return
 
+    def genNewTrainingData(self, x, epoch):
+
+        newTest = x
+        temp = np.zeros((28,28))
+        selection = epoch % 5
+        if selection == 2:  #left down 1, right up 1
+            xArray = x.reshape((28,28))
+            # plt.imshow(xArray)
+            # plt.pause(5.0)
+            # plt.close()
+
+            temp[2 : 15, 1 : 14] = xArray[1 : 14, 1 : 14]
+            temp[15 : , 1 : 14] = xArray[14 : 27, 1 : 14]
+            temp[13 : 26, 14 : 27] = xArray[14 : 27, 14 : 27]
+            temp[ : 13, 14 : 27] = xArray[1 : 14, 14 : 27]
+            # plt.imshow(temp)
+            # plt.pause(5.0)
+            # plt.close()
+
+            newTest = temp.reshape((784,1))
+
+        if selection == 3:  #left up 1, right down 1
+            xArray = x.reshape((28, 28))
+            # plt.imshow(xArray)
+            # plt.pause(5.0)
+            # plt.close()
+
+            temp[ : 13, 1: 14] = xArray[1: 14, 1: 14]
+            temp[13 : 26, 1: 14] = xArray[14: 27, 1: 14]
+            temp[15: , 14: 27] = xArray[14: 27, 14: 27]
+            temp[2: 15, 14: 27] = xArray[1: 14, 14: 27]
+            # plt.imshow(temp)
+            # plt.pause(5.0)
+            # plt.close()
+
+            newTest = temp.reshape((784,1))
+
+        if selection == 4:  #top right 1, bottom left 1
+            xArray = x.reshape((28, 28))
+            # plt.imshow(xArray)
+            # plt.pause(5.0)
+            # plt.close()
+
+            temp[1 : 14, 2: 15] = xArray[1: 14, 1: 14]
+            temp[14 : 27, : 13] = xArray[14: 27, 1: 14]
+            temp[14 : 27, 13: 26] = xArray[14: 27, 14: 27]
+            temp[1 : 14, 15 : ] = xArray[1: 14, 14: 27]
+            # plt.imshow(temp)
+            # plt.pause(5.0)
+            # plt.close()
+
+            newTest = temp.reshape((784,1))
+
+        if selection == 0:  #top left 1, bottom right 1
+            xArray = x.reshape((28, 28))
+            # plt.imshow(xArray)
+            # plt.pause(5.0)
+            # plt.close()
+
+            temp[1 : 14, : 13] = xArray[1: 14, 1: 14]
+            temp[14 : 27, 2 : 15] = xArray[14: 27, 1: 14]
+            temp[14 : 27, 15 : ] = xArray[14: 27, 14: 27]
+            temp[1 : 14, 13 : 26] = xArray[1: 14, 14: 27]
+            # plt.imshow(temp)
+            # plt.pause(5.0)
+            # plt.close()
+
+            newTest = temp.reshape((784,1))
+
+
+        return newTest
 
 #******************************************************************************
 #******************************************************************************
@@ -455,7 +530,7 @@ fVect = np.vectorize(f)
 #                  [0.7, 0.9, 0.1],
 #                  [0.3, 0.5, 0.7]])
 #
-# new = test[0]
+# new = test[:2, :2]
 
 training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
 # net = Network([784, 30, 10])
@@ -463,7 +538,7 @@ training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
 
 net = Network2([784, 64, 30, 10], cost=CrossEntropyCost, cosineSimilarity=True)
 #net.large_weight_initializer()
-evaluation_cost, evaluation_accuracy, _, _, etaHistory = net.SGD(training_data, 1, 10, 0.5, lmbda = 5.0, evaluation_data = validation_data, monitor_evaluation_accuracy = True, monitor_evaluation_cost = True)
+evaluation_cost, evaluation_accuracy, _, _, etaHistory = net.SGD(training_data, 20, 10, 0.5, lmbda = 5.0, evaluation_data = validation_data, monitor_evaluation_accuracy = True, monitor_evaluation_cost = True)
 
 fig1, (ax1, ax2, ax3) = plt.subplots(3, 1)
 ax1.set_title("Evaluation Cost")
