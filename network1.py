@@ -4,8 +4,12 @@ import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from collections import Counter
+
 
 import mnist_loader
+import augmentData
+import convNet
 
 class QuadraticCost(object):
 
@@ -49,26 +53,32 @@ class CrossEntropyCost(object):
 
 class Network2(object):
 
-    def __init__(self, sizes, cost=CrossEntropyCost, cosineSimilarity = False):
+    def __init__(self, sizes, cost = CrossEntropyCost, cosineSimilarity = False,
+                 miniBatchSize = 10, eta = 0.5, lmbda = 0.0, dropout = 0, priority = "trainingCost",
+                 training_data = None, eval_data= None, test_data = None):
         """The list ``sizes`` contains the number of neurons in the respective
         layers of the network.  For example, if the list was [2, 3, 1]
         then it would be a three-layer network, with the first layer
         containing 2 neurons, the second layer 3 neurons, and the
-        third layer 1 neuron.  The biases and weights for the network
-        are initialized randomly, using
-        ``self.default_weight_initializer`` (see docstring for that
-        method).
-
+        third layer 1 neuron.
         """
         self.num_layers = len(sizes)
         self.sizes = sizes
-        self.evalDataList = []
-        self.trainingDataList = []
-        if not cosineSimilarity:
+        self.cost = cost
+        self.cosineSimilarity = cosineSimilarity
+        if not self.cosineSimilarity:
             self.default_weight_initializer()
         else:
             self.similarity_weight_initializer()
-        self.cost = cost
+        self.miniBatchSize = miniBatchSize
+        self.eta = eta
+        self.lmbda = lmbda
+        self.dropout = dropout
+        self.priority = priority
+        self.trainingDataList = list(training_data)
+        self.evalDataList = list(eval_data)
+        self.testDataList = list(test_data)
+
 
     def default_weight_initializer(self):
         """Initialize each weight using a Gaussian distribution with mean 0
@@ -128,20 +138,35 @@ class Network2(object):
         self.weights = [np.random.randn(y, x)
                         for x, y in zip(self.sizes[:-1], self.sizes[1:])]
 
-    def feedforward(self, a):
+    def initialAugmentation(self):
+        self.SGD(1)     # run 1 epoch of SGD
+        accuracy = self.accuracy(training = True, evaluation = False, test = False)
+        print("Accuracy after 1 epoch on training data: {0} / {1}".format(accuracy, len(self.trainingDataList)))
+        self.trainingDataList = augmentData.augmentTrainingData2(self.trainingDataList, self.evalDataList,
+                                                                 self.feedforward, initial = True)
+        print("The training data now has {} trials".format(len(self.trainingDataList)))
+        if not self.cosineSimilarity:
+            self.default_weight_initializer()
+        else:
+            self.similarity_weight_initializer()
+
+
+    def feedforward(self, a, useDropout = True):
         """Return the output of the network if ``a`` is input."""
-#        a = fVect(a)   no improvement, in fact sometimes the network diverged
+#        a = fVect(a)   no improvement, in fact sometimes the network diverges
+        thisLayer = 0
+        lastLayer = (self.num_layers - 1) -1    #don't include final layer in dropout
         for b, w in zip(self.biases, self.weights):
             a = sigmoid(np.dot(w, a) + b)
+            if useDropout and (thisLayer < lastLayer):
+                a *= np.random.binomial([np.ones(a.shape)], 1 - self.dropout)[0] * (1.0 / (1 - self.dropout))
+                thisLayer += 1
         return a
 
-    def SGD(self, training_data, epochs, mini_batch_size, eta,
-            lmbda=0.0,
-            evaluation_data=None,
-            monitor_evaluation_cost=False,
-            monitor_evaluation_accuracy=False,
-            monitor_training_cost=False,
-            monitor_training_accuracy=False):
+    def SGD(self, epochs,
+            tuneNetwork = False,
+            monitor_evaluation_cost = False,
+            monitor_training_accuracy  =False):
         """Train the neural network using mini-batch stochastic gradient
         descent.  The ``training_data`` is a list of tuples ``(x, y)``
         representing the training inputs and the desired outputs.  The
@@ -161,59 +186,122 @@ class Network2(object):
         are empty if the corresponding flag is not set.
 
         """
-        if evaluation_data:
-            self.evalDataList = list(evaluation_data)
-            n_data = len(self.evalDataList)
-
-        self.trainingDataList = list(training_data)
+        n_data = len(self.evalDataList)
+        n_test = len(self.testDataList)
         n = len(self.trainingDataList)
 
         evaluation_cost, evaluation_accuracy = [], []
         training_cost, training_accuracy = [], []
         etaHistory = []
-        for j in np.arange(epochs):
+        j = 0
+        noImprovement = 0
+        currentEta = self.eta
+        currentMiniBatchSize = self.miniBatchSize
+#        for j in np.arange(epochs):
+        while j < epochs:
             random.shuffle(self.trainingDataList)
-            mini_batches = [self.trainingDataList[k:k + mini_batch_size] for k in np.arange(0, n, mini_batch_size)]
+            mini_batches = [self.trainingDataList[k:k + currentMiniBatchSize] for k in np.arange(0, n, currentMiniBatchSize)]
             for mini_batch in mini_batches:
-                self.update_mini_batch(mini_batch, eta, lmbda, len(self.trainingDataList))
-            print("Epoch {} complete".format(j))
-            if monitor_training_cost:
-                cost = self.total_cost(training_data, lmbda)
-                training_cost.append(cost)
-                print("Cost on training data: {}".format(cost))
-            if monitor_training_accuracy:
-                accuracy = self.accuracy(training_data, convert=True)
-                training_accuracy.append(accuracy)
-                print("Accuracy on training data: {0} / {1}".format(accuracy, n))
-            if monitor_evaluation_cost:
-                cost = self.total_cost(self.evalDataList, lmbda, convert=True)
-                evaluation_cost.append(cost)
-                print("Cost on evaluation data: {}".format(cost))
-            if monitor_evaluation_accuracy:
-                accuracy = self.accuracy(self.evalDataList)
+                self.update_mini_batch(mini_batch, currentEta, self.lmbda, len(self.trainingDataList))
 
-                lastAcuuracyIndex = len(evaluation_accuracy)-1
+            if tuneNetwork:
+                print("Epoch {} complete".format(j))
+                if monitor_training_accuracy:
+                    accuracy = self.accuracy(training = True)
+                    training_accuracy.append(accuracy)
+                    print("Accuracy on training data: {0} / {1}".format(accuracy, n))
+                if monitor_evaluation_cost:
+                    cost = self.total_cost(self.evalDataList, self.lmbda, convert=True)
+                    evaluation_cost.append(cost)
+                    print("Cost on evaluation data: {}".format(cost))
 
-                print("Accuracy on evaluation data: {0} / {1}".format(accuracy, n_data))
-                if len(evaluation_accuracy) == 0:
+                cost = self.total_cost(self.trainingDataList, self.lmbda)
+                accuracy = self.accuracy(evaluation = True)
+                last = len(training_cost)-1     # cost and accuracy increment in lock step so only looking at cost is OK
+
+                if len(training_cost) == 0:     # on the first epoch we don't allow tuning
+                    training_cost.append(cost)
                     evaluation_accuracy.append(accuracy)
-                    etaHistory.append(eta)
+                    etaHistory.append(currentEta)
+                    j += 1
+                    print("Cost on training data: {}".format(cost))
+                    print("Accuracy on evaluation data: {0} / {1}".format(accuracy, n_data))
                 else:
-                    if accuracy < evaluation_accuracy[lastAcuuracyIndex]:
+
+                    improvement = True
+                    if self.priority == "trainingCost":
+                        message = "Cost"
+                        if cost > training_cost[last]:              # this cost higher than previous saved cost
+                            improvement = False
+                    else:
+                        message = "Accuracy"
+                        if accuracy < evaluation_accuracy[last]:    # this accuracy lower than previos save accuracy
+                            improvement = False
+
+                    if not improvement:
+                        if noImprovement < 9:
+                            noImprovement += 1
+                        else:
+                            return evaluation_cost, evaluation_accuracy, training_cost, training_accuracy, etaHistory
+
+                        print("This cost {0}, previous saved cost {1}".format(cost, training_cost[last]))
+                        print("This accuracy {0}, previous saved accuracy {1}".format(accuracy, evaluation_accuracy[last]))
+
                         self.weights = self.oldWeights.copy()
                         self.biases = self.oldBiases.copy()
-                        eta = eta/2
-                        print("Worse, keeping old weights and biases and decreasing leaning rate to {}".format(eta))
-                    else:
+                        # temp = (accuracy - evaluation_accuracy[lastAcuuracyIndex]) / evaluation_accuracy[lastAcuuracyIndex]
+                        # eta = eta * (1 + 20 * temp)
+
+                        print(message + " is worse")
+                        if currentEta > self.eta/100:
+                            # currentEta /= 2
+                            currentMiniBatchSize = (currentMiniBatchSize * 8) // 10
+                            print("Keeping old weights and biases and decreasing leaning rate to {}".format(currentEta))
+                        else:
+                            print("Keeping old weights, biases, and learning rate (it got too small)")
+
+
+                        # if noImprovement < 10:
+                        print("Stuck on this epoch {} times".format(noImprovement))
+                        temp = len(self.trainingDataList)
+                        self.trainingDataList = augmentData.augmentTrainingData2(self.trainingDataList,
+                                                                                 self.evalDataList,
+                                                                                 self.feedforward, initial = False)
+                        print("Adding {} new training data trials".format(len(self.trainingDataList) - temp))
+                        # else:
+                        #     return evaluation_cost, evaluation_accuracy, training_cost, training_accuracy, etaHistory
+
+
+                        # if noImprovement > 4:
+                        #     if currentMiniBatchSize > 6:
+                        #         currentMiniBatchSize = (currentMiniBatchSize * 8) // 10
+                        #         print("Decreased mini-batch size to {}".format(currentMiniBatchSize))
+                        #     else:
+                        #         print("Can't decrease mini batch size, its down to {}".format((currentMiniBatchSize)))
+
+                    else:   # training cost decreased
                         self.oldWeights = self.weights.copy()
                         self.oldBiases = self.biases.copy()
-                        eta = 1.25 * eta
-                        print("Better, increasing the learning rate to {}".format(eta))
-                    evaluation_accuracy.append(accuracy)
-                    etaHistory.append(eta)
+                        # temp = (accuracy - evaluation_accuracy[lastAcuuracyIndex]) / evaluation_accuracy[lastAcuuracyIndex]
+                        # eta = eta * (1 + 5 * temp)
+                        # currentEta *= 1.25
+                        # currentMiniBatchSize = self.miniBatchSize    # go back to original minibatch size
+                        currentMiniBatchSize = (currentMiniBatchSize * 10) // 8
+                        print("This cost {0}, previous saved cost {1}".format(cost, training_cost[last]))
+                        print("This accuracy {0}, previous saved accuracy {1}".format(accuracy, evaluation_accuracy[last]))
+                        print(message + " is better")
+                        print("Increasing the learning rate to {}".format(currentEta))
+                        training_cost.append(cost)
+                        evaluation_accuracy.append(accuracy)
+                        etaHistory.append(currentEta)
+                        noImprovement = 0
+                        j += 1
 
-                    if evaluation_accuracy == len(self.evalDataList):
-                        print("Success, exiting now!")
+
+                    # if evaluation_accuracy == len(self.evalDataList):
+                    #     print("Success, exiting now!")
+            else:
+                j += 1
 
         return evaluation_cost, evaluation_accuracy, training_cost, training_accuracy, etaHistory
 
@@ -270,40 +358,23 @@ class Network2(object):
             nabla_w[-l] = np.dot(delta, activations[-l - 1].transpose())
         return (nabla_b, nabla_w)
 
-    def accuracy(self, dataList, convert=False, epoch = 1):
+    def accuracy(self, training = False, evaluation = False, test = False):
         """Return the number of inputs in ``data`` for which the neural
         network outputs the correct result. The neural network's
         output is assumed to be the index of whichever neuron in the
         final layer has the highest activation.
-
-        The flag ``convert`` should be set to False if the data set is
-        validation or test data (the usual case), and to True if the
-        data set is the training data. The need for this flag arises
-        due to differences in the way the results ``y`` are
-        represented in the different data sets.  In particular, it
-        flags whether we need to convert between the different
-        representations.  It may seem strange to use different
-        representations for the different data sets.  Why not use the
-        same representation for all three data sets?  It's done for
-        efficiency reasons -- the program usually evaluates the cost
-        on the training data and the accuracy on other data sets.
-        These are different types of computations, and using different
-        representations speeds things up.  More details on the
-        representations can be found in
-        mnist_loader.load_data_wrapper.
-
+        note: training data is a tuple of two vectors while the other data is a tuple of a vector and a scalar
         """
-        results = []
-        if convert: #training data
-            results = [(np.argmax(self.feedforward(x)), np.argmax(y)) for (x, y) in dataList]
-        else:       #verification or test data
-#            results = [(np.argmax(self.feedforward(x)), y) for (x, y) in dataList]
-            for (x, y) in dataList: #break up list comprehension so I can generate new training data
-                currentResult = np.argmax(self.feedforward(x))
-                results.append((currentResult, y))
-                if (currentResult != y) and (epoch <= 5):    #add bad eval case or a version of it to the training data
-                    temp = vectorized_result(y)
-                    self.trainingDataList.append((self.genNewTrainingData(x, epoch), temp))
+        results = list()
+
+        if training:
+            results = [(np.argmax(self.feedforward(x, useDropout = False)), np.argmax(y)) for (x, y) in self.trainingDataList]
+
+        if evaluation:
+            results = [(np.argmax(self.feedforward(x, useDropout = False)), y) for (x, y) in self.evalDataList]
+
+        if test:
+            results = [(np.argmax(self.feedforward(x, useDropout=False)), y) for (x, y) in self.testDataList]
 
         return sum(int(x == y) for (x, y) in results)
 
@@ -339,104 +410,207 @@ class Network2(object):
         yes = ["Y", "y", "Yes", "yes"]
         similarityWeights = self.weights[0]
 
+        # for numPattern in np.arange(4):
+        #     for row in np.arange(4):
+        #         for col in np.arange(4):
+        #             selection = (numPattern *16) + (row * 4) + col
+        #             temp = similarityWeights[selection, :]
+        #             temp = temp.reshape((28,28))
+        #             temp = temp[(row * stride) : ((row * stride) + stride), (col * stride) : ((col * stride) + stride)]
+        #             if selection == 0:
+        #                 plt.imshow(temp)
+        #                 plt.colorbar()
+        #                 plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
+        #                 plt.pause(0.5)
+        #                 myInput = input("See another?")
+        #                 if myInput not in yes:
+        #                     return
+        #             else:
+        #                 plt.close()
+        #                 plt.imshow(temp)
+        #                 plt.colorbar()
+        #                 plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
+        #                 plt.pause(0.5)
+        #                 myInput = input("See another?")
+        #                 if myInput not in yes:
+        #                     return
+
         for numPattern in np.arange(4):
+            myOutput = np.zeros((28, 28))
             for row in np.arange(4):
                 for col in np.arange(4):
                     selection = (numPattern *16) + (row * 4) + col
                     temp = similarityWeights[selection, :]
                     temp = temp.reshape((28,28))
-                    temp = temp[(row * stride) : ((row * stride) + stride), (col * stride) : ((col * stride) + stride)]
-                    if selection == 0:
-                        plt.imshow(temp)
-                        plt.colorbar()
-                        plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
-                        plt.pause(0.5)
-                        myInput = input("See another?")
-                        if myInput not in yes:
-                            return
-                    else:
-                        plt.close()
-                        plt.imshow(temp)
-                        plt.colorbar()
-                        plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
-                        plt.pause(0.5)
-                        myInput = input("See another?")
-                        if myInput not in yes:
-                            return
+                    temp = temp[(row * stride): ((row * stride) + stride), (col * stride): ((col * stride) + stride)]
+
+                    myOutput[(row * 7) : ((row * 7) + 7), (col * 7) : ((col * 7) + 7)] = temp
+
+                    # temp = temp[(row * stride) : ((row * stride) + stride), (col * stride) : ((col * stride) + stride)]
+                    # if selection == 0:
+                    #     plt.imshow(temp)
+                    #     plt.colorbar()
+                    #     plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
+                    #     plt.pause(0.5)
+                    #     myInput = input("See another?")
+                    #     if myInput not in yes:
+                    #         return
+                    # else:
+                    #     plt.close()
+                    #     plt.imshow(temp)
+                    #     plt.colorbar()
+                    #     plt.title("Pattern{0}, Row{1}, Col{2}".format(numPattern, row, col))
+                    #     plt.pause(0.5)
+                    #     myInput = input("See another?")
+                    #     if myInput not in yes:
+                    #         return
+            plt.imshow(myOutput)
+            plt.colorbar()
+            plt.title("Pattern {}".format(numPattern))
+            plt.pause(5.0)
+            plt.close()
         return
 
-    def genNewTrainingData(self, x, epoch):
+    def augmentTrainingData(self, x, vectorY):
 
-        newTest = x
+        xArray = x.reshape((28, 28))
+#       plt.imshow(xArray)
+#       plt.pause(5.0)
+#       plt.close()
+
+        # deform left side down 1, right side up 1
         temp = np.zeros((28,28))
-        selection = epoch % 5
-        if selection == 2:  #left down 1, right up 1
-            xArray = x.reshape((28,28))
-            # plt.imshow(xArray)
-            # plt.pause(5.0)
-            # plt.close()
+        temp[2 : 15, 1 : 14] = xArray[1 : 14, 1 : 14]
+        temp[15 : , 1 : 14] = xArray[14 : 27, 1 : 14]
+        temp[13 : 26, 14 : 27] = xArray[14 : 27, 14 : 27]
+        temp[ : 13, 14 : 27] = xArray[1 : 14, 14 : 27]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
-            temp[2 : 15, 1 : 14] = xArray[1 : 14, 1 : 14]
-            temp[15 : , 1 : 14] = xArray[14 : 27, 1 : 14]
-            temp[13 : 26, 14 : 27] = xArray[14 : 27, 14 : 27]
-            temp[ : 13, 14 : 27] = xArray[1 : 14, 14 : 27]
-            # plt.imshow(temp)
-            # plt.pause(5.0)
-            # plt.close()
+        #left up 1, right down 1
+        temp = np.zeros((28,28))
+        temp[ : 13, 1: 14] = xArray[1: 14, 1: 14]
+        temp[13 : 26, 1: 14] = xArray[14: 27, 1: 14]
+        temp[15: , 14: 27] = xArray[14: 27, 14: 27]
+        temp[2: 15, 14: 27] = xArray[1: 14, 14: 27]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
-            newTest = temp.reshape((784,1))
+        #top right 1, bottom left 1
+        temp = np.zeros((28,28))
+        temp[1 : 14, 2: 15] = xArray[1: 14, 1: 14]
+        temp[14 : 27, : 13] = xArray[14: 27, 1: 14]
+        temp[14 : 27, 13: 26] = xArray[14: 27, 14: 27]
+        temp[1 : 14, 15 : ] = xArray[1: 14, 14: 27]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
-        if selection == 3:  #left up 1, right down 1
-            xArray = x.reshape((28, 28))
-            # plt.imshow(xArray)
-            # plt.pause(5.0)
-            # plt.close()
+        #top left 1, bottom right 1
+        temp = np.zeros((28,28))
+        temp[1 : 14, : 13] = xArray[1: 14, 1: 14]
+        temp[14 : 27, 2 : 15] = xArray[14: 27, 1: 14]
+        temp[14 : 27, 15 : ] = xArray[14: 27, 14: 27]
+        temp[1 : 14, 13 : 26] = xArray[1: 14, 14: 27]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
-            temp[ : 13, 1: 14] = xArray[1: 14, 1: 14]
-            temp[13 : 26, 1: 14] = xArray[14: 27, 1: 14]
-            temp[15: , 14: 27] = xArray[14: 27, 14: 27]
-            temp[2: 15, 14: 27] = xArray[1: 14, 14: 27]
-            # plt.imshow(temp)
-            # plt.pause(5.0)
-            # plt.close()
+        #drop top quarter of rows
+        temp = np.zeros((28,28))
+        temp[7 : , : ] = xArray[7: , : ]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
-            newTest = temp.reshape((784,1))
+        #drop lower right quadrant
+        temp = np.zeros((28,28))
+        temp[ : 14, : 14] = xArray[ : 14,  : 14]
+        #missing quadrant
+        temp[14 :  , 14 : ] = xArray[14 : , 14: ]
+        temp[ : 14, 14 : ] = xArray[ : 14, 14 : ]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
-        if selection == 4:  #top right 1, bottom left 1
-            xArray = x.reshape((28, 28))
-            # plt.imshow(xArray)
-            # plt.pause(5.0)
-            # plt.close()
-
-            temp[1 : 14, 2: 15] = xArray[1: 14, 1: 14]
-            temp[14 : 27, : 13] = xArray[14: 27, 1: 14]
-            temp[14 : 27, 13: 26] = xArray[14: 27, 14: 27]
-            temp[1 : 14, 15 : ] = xArray[1: 14, 14: 27]
-            # plt.imshow(temp)
-            # plt.pause(5.0)
-            # plt.close()
-
-            newTest = temp.reshape((784,1))
-
-        if selection == 0:  #top left 1, bottom right 1
-            xArray = x.reshape((28, 28))
-            # plt.imshow(xArray)
-            # plt.pause(5.0)
-            # plt.close()
-
-            temp[1 : 14, : 13] = xArray[1: 14, 1: 14]
-            temp[14 : 27, 2 : 15] = xArray[14: 27, 1: 14]
-            temp[14 : 27, 15 : ] = xArray[14: 27, 14: 27]
-            temp[1 : 14, 13 : 26] = xArray[1: 14, 14: 27]
-            # plt.imshow(temp)
-            # plt.pause(5.0)
-            # plt.close()
-
-            newTest = temp.reshape((784,1))
+        #drop lower left quadrant
+        temp = np.zeros((28,28))
+        temp[ : 14,  : 14] = xArray[ : 14,  : 14]
+        temp[14 : ,  : 14] = xArray[14 : ,  : 14]
+        #missing quadrant
+        temp[ : 14, 14 : ] = xArray[ : 14, 14 : ]
+        # plt.imshow(temp)
+        # plt.pause(5.0)
+        # plt.close()
+        newTest = temp.reshape((784,1))
+        self.trainingDataList.append((newTest, vectorY))
 
 
-        return newTest
 
+        return
+
+    def finalResults(self):
+        failures = dict()
+        results = list()
+        histList = list()
+        yes = ["y", "Y", "yes", "Yes"]
+
+        for (x, y) in self.testDataList:
+            currentResult = np.argmax(self.feedforward(x, useDropout=False))
+            results.append((currentResult, y))
+
+            if (currentResult != y):  # didn't match so save it
+                histList.append(y)
+                if y in failures.keys():
+                    failures[y].append((currentResult, x))
+                else:
+                    failures[y] = list()
+                    failures[y].append((currentResult, x))
+
+        temp = sum(int(x == y) for (x, y) in results)
+        print("The accuracy on the test data is {} / 10000".format(temp))
+
+        plt.title("Histogram of Failed Test Data Trials")
+        plt.hist(np.asarray(histList), 10)
+        plt.pause(5.0)
+
+        reply = input("Look at failed trials")
+
+        while (reply in yes):
+            reply = input("Which bad boy (0-9) do you want to see?")
+            try:
+                key = int(reply)
+                print("There were {0} {1}s that failed".format(len(failures[key]), key))
+                for num in np.arange(len(failures[key])):
+                    thisFailure = failures[key][num][1]
+                    valArray = thisFailure.reshape((28, 28))
+                    plt.title("Is a {0}, catagorized as {1}".format(key, failures[key][num][0]))
+                    plt.imshow(valArray)
+                    plt.pause(5.0)
+                    plt.close()
+                    reply = input("See another example?")
+                    if reply not in yes:
+                        return
+            except:
+                print("You didnt enter a numeral")
+
+            reply = ("Look at another number?")
+
+        return
 #******************************************************************************
 #******************************************************************************
 #******************************************************************************
@@ -521,30 +695,54 @@ def buildSimilarityWeights():
 
     return similarityWeights
 
-f = lambda value: 1 if value > 0.3 else 0
+f = lambda value: 1 if value > 1 else value
 fVect = np.vectorize(f)
 
 #*********************************** Sandbox **********************************
+# dropOut = 0.2
+# test = np.ones((64,1))
+# test *= np.random.binomial([np.ones(test.shape)], .80)[0]
+# test += np.random.binomial([np.ones(test.shape)], .2)[0] * 0.2
+# test = fVect(test)
 
-# test = np.array([[0.1, 0.3, 0.5],
-#                  [0.7, 0.9, 0.1],
-#                  [0.3, 0.5, 0.7]])
+# myfilters = convNet.initializeConvFilters(num=5)
+# bias = convNet.initializeBias(myfilters)
 #
-# new = test[:2, :2]
+# data = convNet.makeTestData()[0]
+#
+# myConvResult = convNet.conv(data, myfilters, bias, activation="relu")
+# myPoolResult = convNet.maxPool(myConvResult, xStride=2, yStride=2)
+#
+# resultDims = myPoolResult.shape
+#
+# resultColVec = myPoolResult.reshape((resultDims[0] * resultDims[1] * resultDims[2], 1))
+
+# myMatrix = np.array([[1, 2, 3],
+#                     [1, 2, 3],
+#                     [1, 2, 3]])
+#
+# myResult = (myMatrix * myMatrix).sum()
+
 
 training_data, validation_data, test_data = mnist_loader.load_data_wrapper()
-# net = Network([784, 30, 10])
-# net.SGD(training_data, 10, 10, 3.0, test_data=test_data)
 
-net = Network2([784, 64, 30, 10], cost=CrossEntropyCost, cosineSimilarity=True)
+net = Network2([784, 64, 32, 10], cost = CrossEntropyCost, cosineSimilarity = True,
+               miniBatchSize = 20, eta = 0.5, lmbda = 5.0, dropout = 0.1, priority = "evaluationAccuracy",
+               training_data =  training_data, eval_data = validation_data, test_data = test_data)
+
+net.initialAugmentation()
+
+#net.seeCosineSimilarityPatterns()
 #net.large_weight_initializer()
-evaluation_cost, evaluation_accuracy, _, _, etaHistory = net.SGD(training_data, 20, 10, 0.5, lmbda = 5.0, evaluation_data = validation_data, monitor_evaluation_accuracy = True, monitor_evaluation_cost = True)
+
+_, evaluation_accuracy, training_cost, _, etaHistory = net.SGD(40, tuneNetwork= True)
+#net.seeCosineSimilarityPatterns()
 
 fig1, (ax1, ax2, ax3) = plt.subplots(3, 1)
-ax1.set_title("Evaluation Cost")
+ax1.set_title("Training Cost")
 ax1.set_xlabel("Epoch Number")
 ax1.set_ylabel("Cost")
-ax1.plot(evaluation_cost)
+ax1.plot(training_cost)
 ax2.set_title("Evaluation Accuracy")
 ax2.set_xlabel("Epoch Number")
 ax2.set_ylabel("Accuracy")
@@ -556,10 +754,6 @@ ax3.plot(etaHistory)
 fig1.tight_layout(h_pad=0.5)
 plt.show()
 
-myInput = input("Hit y to view after training patterns")
-if myInput == "y":
-    net.seeCosineSimilarityPatterns()
 
-testDataList = list(test_data)
-finalAccuracy = net.accuracy(testDataList, convert=False)
-print("The accuracy on the test data is {} / 10000".format(finalAccuracy))
+finalAccuracy = net.finalResults()
+
